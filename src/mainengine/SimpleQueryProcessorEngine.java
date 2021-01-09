@@ -19,6 +19,10 @@
 
 
 package mainengine;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
 import java.time.Duration;
@@ -33,9 +37,13 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Scanner;
-//import java.sql.ResultSet;
+import java.util.stream.Collectors;
 
+
+import mainengine.nlq.NLQValidationResults;
+import mainengine.nlq.NLQValidator;
 import mainengine.nlq.NLTranslator;
 import mainengine.nlq.QueryForm;
 import mainengine.rmiTransfer.RMIInputStream;
@@ -44,7 +52,12 @@ import mainengine.rmiTransfer.RMIInputStreamImpl;
 import mainengine.rmiTransfer.RMIOutputStreamImpl;
 
 import cubemanager.CubeManager;
+import cubemanager.cubebase.CubeBase;
 import cubemanager.cubebase.CubeQuery;
+import cubemanager.cubebase.Dimension;
+import cubemanager.cubebase.Hierarchy;
+import cubemanager.cubebase.Level;
+import cubemanager.cubebase.BasicStoredCube;
 //import exctractionmethod.SqlQuery;
 /*
 import filecreation.FileMgr;
@@ -57,6 +70,10 @@ import parsermgr.ParserManager;
 import result.Result;
 import setup.ModeOfWork;
 import setup.ModeOfWork.WorkMode;
+
+
+
+import interestingnessengine.InterestingnessManager;
 
 
 /**
@@ -81,8 +98,21 @@ public class SimpleQueryProcessorEngine extends UnicastRemoteObject implements I
 	private Result currentResult;
 	private String currentQueryName;
 	
-	private NLTranslator translator = new NLTranslator();
+	private NLTranslator translator;
+	private NLQValidator nlqProcessor;
+	private ArrayList<String> cubeNames;
+	private ArrayList<String> aggrFunctions;
+	private ArrayList<String> measures;
+	private ArrayList <String> dimensions;
+	private HashMap<String, ArrayList<String>> dimensionsToLevelsHashmap;
+	private HashMap<String, ArrayList<String>> levelsToDimensionsHashmap;
 
+
+	
+	
+	private InterestingnessManager interestMng;
+	private int historyCounter = 0;
+	
 /**
  * Simple constructor for the class
  * @throws RemoteException
@@ -124,9 +154,28 @@ public class SimpleQueryProcessorEngine extends UnicastRemoteObject implements I
 		cubeManager.CreateCubeBase(schemaName, login, passwd);
 		constructDimension(inputFolder, cubeName);
 		cubeManager.setCubeQueryTranslator();
+		fillQueryLists();
 		System.out.println("DONE WITH INIT");
 	}
+	
+	public void initializeConnectionWithIntrMng(String schemaName, String login, String passwd, String inputFolder, String historyFolder,
+			String expValuesFolder, String expLabelsFolder, int k, String cubeName) throws RemoteException {
+		initializeCubeMgr(inputFolder);
+		cubeManager.CreateCubeBase(schemaName, login, passwd);
+		constructDimension(inputFolder, cubeName);
+		initializeInterestMgr(historyFolder, expValuesFolder, expLabelsFolder, k);
+		cubeManager.setCubeQueryTranslator();
+		System.out.println("DONE WITH INIT");
 		
+	}
+	private void initializeInterestMgr(String historyFolder, String expValuesFolder, String expLabelsFolder, int k) throws RemoteException {
+		if(historyFolder.equals("") && expValuesFolder.equals("") && expLabelsFolder.equals("")) {
+			interestMng = new InterestingnessManager(cubeManager, k);
+		}else {
+			interestMng = new InterestingnessManager(historyFolder, expValuesFolder, expLabelsFolder, cubeManager, k);
+		}
+	}
+
 	private void initializeCubeMgr(String lookupFolder) throws RemoteException {
 		cubeManager = new CubeManager(lookupFolder);
 	}
@@ -163,6 +212,63 @@ public class SimpleQueryProcessorEngine extends UnicastRemoteObject implements I
 		}
 	}
 
+	private void fillQueryLists() {
+		//1.Bring data for CubeName
+		cubeNames = new ArrayList<String>();
+		//CubeBase cBase = cubeManager.getCubeBase();
+		//List<BasicStoredCube> cubes = cBase.getBasicStoredCube();
+		/*
+		for (int i=0; i<cubes.size(); i++) {
+			cubeNames.add(cubes.get(i).getName());
+		}*/
+		cubeNames.add(this.prsMng.name_creation);
+		
+		//2.Create data for AggrFunc
+		aggrFunctions = new ArrayList<String>();
+		aggrFunctions.add("max");
+		aggrFunctions.add("min");
+		aggrFunctions.add("count");
+		aggrFunctions.add("avg");
+		aggrFunctions.add("sum");
+		
+		//3.Bring data for Measure
+		measures = new ArrayList<String>();
+		measures= this.prsMng.measurefields;
+		
+		//4.Bring data for Dimensions
+		dimensions = new ArrayList<String>();
+		dimensions = this.prsMng.dimensionlst;
+		
+		//5.Bring data for levels
+		dimensionsToLevelsHashmap = new HashMap<String, ArrayList<String>>();
+		levelsToDimensionsHashmap = new HashMap<String, ArrayList<String>>();
+		List<Dimension> dimensionsList = this.cubeManager.getDimensions();
+		ArrayList<String> tmpLvls = null; 
+		ArrayList<String> tmpDim = null;
+		for (int i=0;i < dimensionsList.size();i ++) {
+			Dimension dim = dimensionsList.get(i);
+			for(int j=0; j<dim.getHier().size(); j++) {
+				List<Level> l = dim.getHier().get(j).getLevels();
+				tmpLvls = new ArrayList<String>();
+				for (int k=0; k<l.size(); k++) {
+					tmpLvls.add(l.get(k).getName());
+					String tmpLevelKey = l.get(k).getName();
+					//TODO na ginei elegxos oti leitourgei an uparxoun idia lvl names. h pkdd99_star den exei idia lvl names, den to checkara.
+					if(levelsToDimensionsHashmap.containsKey(tmpLevelKey)) {
+						tmpDim = levelsToDimensionsHashmap.get(tmpLevelKey);
+						tmpDim.add(dimensionsList.get(i).getName());
+						levelsToDimensionsHashmap.put(tmpLevelKey, tmpDim);
+					}else {
+						tmpDim = new ArrayList<String>();
+						tmpDim.add(dimensionsList.get(i).getName());
+						levelsToDimensionsHashmap.put(tmpLevelKey, tmpDim);
+					}
+				}
+				dimensionsToLevelsHashmap.put(dimensionsList.get(i).getName(), tmpLvls);
+			}
+		}
+		
+	}
 //	public void optionsChoice(boolean audio, boolean word)
 //			throws RemoteException {
 //		optMgr.setAudio(audio);
@@ -265,62 +371,33 @@ public class SimpleQueryProcessorEngine extends UnicastRemoteObject implements I
 		return outputLocation;
 	}//answerCubeQueryFromString
 	
+	
+	/**Gets a natural language query as a string, analyzes it, produces a cube query, 
+	 * executes the query and produces the output of the query.
+	 * 
+	 * The idea is:
+	 * 1. Parse and analyze the natural language query via <code>analyzeNLQuery</code> of <code>NLTranslator</code>, see {@link NLTranslator}.
+	 * 2. Produces a <code>QueryForm</code> object which contains the cube query in its fields, see {@link QueryForm}.
+	 * 3. Creates a String with the cube query in order to call <code>answerCubeQueryFromString</code> with this String as a parameter.
+	 * 4. Returns the results in a file with the name of the query and outputs them to the console.
+	 * 
+	 * @param queryRawString a String with the natural language query
+	 * @return a String containing the location of output file at the server
+	 * @author DimosGkitsakis
+	 * 
+	 */
 	@Override
 	public String answerCubeQueryFromNLString(String queryRawString) throws RemoteException{
-		//Use a hashmap to get any useful data (like queryname) from the raw query string
-		HashMap<String, String> queryParams = new HashMap<String, String>();
-		
-		Instant t0 = Instant.now();
-		
-		
+		translator = new NLTranslator(dimensionsToLevelsHashmap, levelsToDimensionsHashmap);
 		//1. parse and analyse natural language query and produce a CubeQuery
 		QueryForm query = translator.analyzeNLQuery(queryRawString);
+		
 		String analysedString = query.toString();
 		System.out.println(analysedString);
-
-		
-		
-		CubeQuery currentCubQuery = cubeManager.createCubeQueryFromString(analysedString, queryParams); 
-		this.currentCubeQuery = currentCubQuery;
-		
-		//2. execute the query AND populate Result with a 2D string
-		//Result res = cubeManager.getCubeBase().executeQuery(currentCubQuery);
-		Result res = cubeManager.executeQuery(currentCubQuery);
-		this.currentResult = res;
-		
-		Instant tExecuted = Instant.now();
-		long durationExecution = Duration.between(t0, tExecuted).toMillis();
-
-		//3a. print result to file and screen
-		String queryName = queryParams.get("QueryName");
-		this.currentQueryName = queryName;
-		
-				
-		//3b. print result to file
-		String outputLocation = this.printToTabTextFile(currentCubQuery,  "OutputFiles" + File.separator);
-		//String outputInfoLocation = this.printQueryInfo(currentCubQuery,  "OutputFiles/");
-		//System.out.println("SQP produces: " + outputLocation);		
-
-		//Replaced all printing of String[][] with printing of Cells which seems to be identical 
-		//res.printStringArrayTostream(System.out, res.getResultArray());
-		//System.out.println("------- Done with printString, go for printCells  --------------------------"+"\n");
-
-		//TODO SUPER MUST: devise a nice way to handle the output to console when in development mode
-		if ((ModeOfWork.mode == WorkMode.DEBUG_GLOBAL)||(ModeOfWork.mode == WorkMode.DEBUG_QUERY)) {
-			res.printCellsToStream(System.out);
-		}
-		Instant tOutputed = Instant.now();
-		
-		
-		long durationExecToOutput = Duration.between(tExecuted, tOutputed).toMillis();
-		long durationExecTotal = Duration.between(t0, tOutputed).toMillis();
-		
-		System.out.println("\n\n@TIMER\tQuery\t" + queryName + "\tQuery Execution:\t" + durationExecution
-				+ "\tQuery Output:\t" + durationExecToOutput + "\tQuery Total:\t" + durationExecTotal);
-		
-		System.out.println("------- Done with " + queryName + " --------------------------"+"\n");
-
+		//2. call answerCubeQueryFromString() with the analysedNLString as parameter
+		String outputLocation = answerCubeQueryFromString(analysedString);
 		return outputLocation;
+		
 	}//answerCubeQueryFromNLString
 
 
@@ -386,30 +463,18 @@ System.out.println("@SRV: INFO FILE\t" + resMetadata.getResultInfoFile());
 		return resMetadata;
 	}//answerCubeQueryFromStringWithMetada
 	
+	/**
+	 * Same idea as the {@link #answerCubeQueryFromStringWithMetadata(String)}, but for a natural language query instead of cube query.
+	 * Gets the natural language query from a string, executes it and produces the output of a query as a ResultFileMetadata object.
+	 * Result produced via {@link #answerCubeQueryFromNLString(String)} instead of {@link #answerCubeQueryFromString(String)}.
+	 * 
+	 * @param queryRawString a String with the natural language query
+	 * @return a ResultFileMetadata containing info on the location of output files at the server
+	 * 
+	 * 
+	 */
 	@Override
 	public ResultFileMetadata answerCubeQueryFromNLStringWithMetadata(String queryRawString) throws RemoteException {
-//		//Use a hashmap to get any useful data (like queryname) from the raw query string
-//		HashMap<String, String> queryParams = new HashMap<String, String>();
-//		
-//		//1. parse query and produce a CubeQuery
-//		CubeQuery currentCubQuery = cubeManager.createCubeQueryFromString(queryRawString, queryParams);
-//
-//		//2. execute the query AND populate Result with a 2D string
-//		//Result res = cubeManager.getCubeBase().executeQuery(currentCubQuery);
-//		Result res = cubeManager.executeQuery(currentCubQuery);
-//				
-//		//3a. print result to screen
-//		String queryName = queryParams.get("QueryName");
-//		
-//		//Replaced all printing of String[][] with printing of Cells which seems to be identical 
-//		//res.printStringArrayTostream(System.out, res.getResultArray());
-//		//System.out.println("------- Done with printString, go for printCells  --------------------------"+"\n");
-//		res.printCellsToStream(System.out);
-//		System.out.println("------- Done with " + queryName + " --------------------------"+"\n");
-//				
-//		//3b. print result to file
-//		String outputLocation = this.printToTabTextFile(currentCubQuery,  "OutputFiles/");
-
 
 		String outputLocation = answerCubeQueryFromNLString(queryRawString);
 		String outputInfoLocation = this.printQueryInfo(this.currentCubeQuery,  "OutputFiles" + File.separator);
@@ -586,8 +651,157 @@ System.out.println("@SRV: INFO FILE\t" + resMetadata.getResultInfoFile());
 		String fileName = outputFolder + cubequery.getName() + "_info.txt";
 		return fileName;
 	}//end method
-
-
 	
+	
+	/**
+	 * Gets the natural language query from a string, passes it to a NLQValidator object, which parses it and produces error messages if any errors where found.
+	 * The errors are returned to the client as a ErrorChecking.txt file, so the client can produce the error message to the end-user.
+	 *
+	 *@author DimosGkitsakis
+	 *@param queryString A String with the natural language query given by the user.
+	 *@return a ResultFileMetadata object containing info on the location of the error checking file at the server
+	 */
+	@Override
+	public ResultFileMetadata prepareCubeQuery(String queryString) throws RemoteException {
+		
+		nlqProcessor = produceNLQProcessorObject();
+		NLQValidationResults results = nlqProcessor.prepareCubeQuery(queryString);
+		
+		String errorCheckingInfoOutput = this.printErrorCheckingResultsToFile(results,"OutputFiles" + File.separator + "ErrorChecking.txt");
+		
+		ResultFileMetadata resMetadata = new ResultFileMetadata();
+		resMetadata.setErrorCheckingFile(errorCheckingInfoOutput);
+		return resMetadata;		
+	}
+
+	private NLQValidator produceNLQProcessorObject() {
+		return new NLQValidator(cubeNames, aggrFunctions, measures, dimensions, dimensionsToLevelsHashmap, levelsToDimensionsHashmap);
+	}
+	
+	private String printErrorCheckingResultsToFile(NLQValidationResults results, String filePath) {
+		String fileName = filePath;
+		File file=new File(fileName);
+		FileOutputStream fileOutputStream=null;
+		PrintStream printStream=null;
+		try {
+			fileOutputStream=new FileOutputStream(file);
+			printStream=new PrintStream(fileOutputStream);
+			printStream.print(results.getHashKey() +";\n");
+			printStream.print(results.getFoundError() +";\n");
+			printStream.print(results.getErrorCode() + ";\n");
+			printStream.print(results.getDetails());
+			
+		} catch (Exception e) {
+			e.printStackTrace();
+		}finally {
+			try {
+				if(fileOutputStream!=null){
+					fileOutputStream.close();
+				}
+				if(printStream!=null){
+					printStream.close();
+				}
+			} catch (Exception e) {
+				e.printStackTrace();
+			}//end finally try
+		}//end finally
+		return fileName;
+	}
+
+	/**
+	 * Populates a file qX.txt in History/Queries, X being an augmenting number, containing the raw query string
+	 * and a file qX.tab in History/Results, containing the results of Xth query.
+	 * @param queryString  A String with the query
+	 * @param queryResult  The {@link Result} of the query
+	 */
+	private void saveQueryHistory(String queryString, Result queryResult) {
+		try {
+			List<String> filesInFolder = Files.walk(Paths.get("History/Queries"))
+					.filter(Files::isRegularFile)
+					.map(Path::toString)
+					.collect(Collectors.toList());
+			if(filesInFolder.size() > 0) {
+				historyCounter = Integer.parseInt(String.valueOf(filesInFolder.get(0).charAt(17)));
+			}
+
+		} catch (IOException e1) {
+			e1.printStackTrace();
+		}
+
+		historyCounter += 1;
+		FileOutputStream fileOutputStream=null;
+		PrintStream printStream=null;
+
+		String queryFileName = "History/Queries/q" + historyCounter + ".txt";
+		File queryFile=new File(queryFileName);
+
+		try {
+			fileOutputStream=new FileOutputStream(queryFile);
+			printStream=new PrintStream(fileOutputStream);
+
+			printStream.print(queryString+"\n\n");
+
+		} catch (Exception e) {
+			e.printStackTrace();
+		}finally {
+			try {
+				if(fileOutputStream!=null){
+					fileOutputStream.close();
+				}
+				if(printStream!=null){
+					printStream.close();
+				}
+			} catch (Exception e) {
+				e.printStackTrace();
+			}//end finally try
+		}//end finally
+
+		fileOutputStream = null;
+		printStream = null;
+		String resultFileName = "History/Results/q" + historyCounter + ".tab";
+		File resultFile=new File(resultFileName);
+
+		try {
+			fileOutputStream=new FileOutputStream(resultFile);
+			printStream=new PrintStream(fileOutputStream);
+
+			queryResult.printCellsToStream(printStream);
+
+		} catch (Exception e) {
+			e.printStackTrace();
+		}finally {
+			try {
+				if(fileOutputStream!=null){
+					fileOutputStream.close();
+				}
+				if(printStream!=null){
+					printStream.close();
+				}
+			} catch (Exception e) {
+				e.printStackTrace();
+			}//end finally try
+		}//end finally
+	}//end saveQueryHistory
+
+
+	public String[] answerCubeQueryWithInterestMeasures(String queryString, List<String> measures)
+			throws RemoteException {
+		// answer query
+
+		answerCubeQueryFromString(queryString); 
+		this.interestMng.updateState(currentCubeQuery, currentResult);
+		double result;
+		String[] results = new String[measures.size()];
+
+		for(int i = 0; i < measures.size(); i++) {
+			//compute each measure
+			result = interestMng.computeMeasure(measures.get(i), currentCubeQuery, currentResult);
+			results[i] = Double.toString(result);
+		}
+
+		saveQueryHistory(queryString,currentResult);
+
+		return results;
+	}//end answerCubeQueryWithInterestMeasures
 	
 }//end class
